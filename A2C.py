@@ -10,8 +10,6 @@ import argparse
 
 import time
 
-# from tqdm import tqdm
-
 # import optimizers
 from jax.experimental import optimizers
 
@@ -25,10 +23,10 @@ class AC_network(hk.Module):
     def __call__(self, s):
         phi = hk.Sequential([
                         hk.Conv2D(16, 3, padding='VALID'),
-                        jx.nn.silu,
+                        jx.nn.relu,
                         hk.Flatten(),
                         hk.Linear(128),
-                        jx.nn.silu
+                        jx.nn.relu
                     ])
         pi_layer = hk.Linear(self.num_actions)
         V_layer = hk.Linear(1)
@@ -39,28 +37,16 @@ def AC_loss(params, network, last_states, actions, rewards, curr_states, termina
     pi_logit_curr, V_curr = network(params,curr_states)
     pi_logit_last, V_last = network(params,last_states)
 
-    # print(terminals.shape)
-    # print(V_curr.shape)
-    # print(rewards.shape)
-    # print(jx.lax.stop_gradient(gamma*jnp.where(terminals,0,V_curr)+rewards-V_last).shape)
-
     critic_loss = jnp.mean(0.5*(gamma*jx.lax.stop_gradient(jnp.where(terminals,0,V_curr))+rewards-V_last)**2)
     entropy = -jnp.sum(jx.nn.log_softmax(pi_logit_last)*jx.nn.softmax(pi_logit_last), axis=1)
     actor_loss = jnp.mean(-0.5*(jx.lax.stop_gradient(gamma*jnp.where(terminals,0,V_curr)+rewards-V_last)*jx.nn.log_softmax(pi_logit_last)[jnp.arange(num_actors),actions])-beta*entropy)
     loss = critic_loss+actor_loss
     return loss
-AC_loss = jit(AC_loss, static_argnums=(1,9,10))
 
 def sample_actions(params, network, states, key, num_actions):
     pi_logit, _ = network(params,states)
     output = jx.random.categorical(key, pi_logit)
     return output
-sample_actions = jit(sample_actions, static_argnums=(1,4))
-
-# def sample_action(logit, key):
-#     output = jx.random.categorical(key, logit)
-#     return output
-# sample_action = jit(sample_action)
 
 class AC_agent():
     def __init__(self,
@@ -88,18 +74,11 @@ class AC_agent():
         dummy_states = jnp.zeros((num_actors,10,10,in_channels))
         params = network.init(subkey,dummy_states)
 
-        self.sample = sample_actions
-
         self.opt_state = opt_init(params)
 
-        self.sample = sample_actions
+        self.sample = jit(sample_actions, static_argnums=(1,9,10))
         self.opt_update = jit(self.opt_update)
         self.loss_grad = jit(grad(AC_loss), static_argnums=(1,9,10))
-        # loss_apply = loss.apply
-        # self.sample_apply = self.sample.apply
-        # self.opt_update = self.opt_update
-        # self.loss_grad = grad(loss_apply)
-
 
     def act(self, states):
         states = jnp.stack(states)
@@ -165,24 +144,25 @@ termination_times = []
 t=0
 t_start = time.time()
 while t < num_frames:
-    actions = [valid_actions[a] for a in agent.act(states)]
-    print(actions)
+    actions = agent.act(states)
     rewards = []
     new_terminals = []
     for i, (env, term, action) in enumerate(zip(envs, terminals, actions)):
+        #continue until terminated, when terminated reset env and begin new episode immediately
         if(not term):
-            r, term = env.act(action)
-            curr_returns[i]+=r
+            #translate agent actions to world actions
+            r, term = env.act(valid_actions[action])
+            curr_returns[i] += r
         else:
             r = 0
             term = False
-            termination_times+=[t]
-            returns+=[curr_returns[i]]
+            termination_times += [t]
+            returns += [curr_returns[i]]
             avg_return = 0.99 * avg_return + 0.01 * curr_returns[i]
-            curr_returns[i]=0
+            curr_returns[i] = 0
             env.reset()
-        rewards+=[r]
-        new_terminals+=[term]
+        rewards += [r]
+        new_terminals += [term]
     terminals = new_terminals
     last_states = states
     states = [env.state().astype(float) for env in envs]
