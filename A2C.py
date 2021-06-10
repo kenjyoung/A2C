@@ -35,11 +35,9 @@ class AC_network(hk.Module):
         phi = phi(s)
         return pi_layer(phi), V_layer(phi)[:,0]
 
-def AC_loss(last_states, actions, rewards, curr_states, terminals, beta, gamma, num_actors, num_actions):
-    network = AC_network(num_actions)
-
-    pi_logit_curr, V_curr = network(curr_states)
-    pi_logit_last, V_last = network(last_states)
+def AC_loss(params, network, last_states, actions, rewards, curr_states, terminals, beta, gamma, num_actors, num_actions):
+    pi_logit_curr, V_curr = network(params,curr_states)
+    pi_logit_last, V_last = network(params,last_states)
 
     # print(terminals.shape)
     # print(V_curr.shape)
@@ -51,35 +49,13 @@ def AC_loss(last_states, actions, rewards, curr_states, terminals, beta, gamma, 
     actor_loss = jnp.mean(-0.5*(jx.lax.stop_gradient(gamma*jnp.where(terminals,0,V_curr)+rewards-V_last)*jx.nn.log_softmax(pi_logit_last)[jnp.arange(num_actors),actions])-beta*entropy)
     loss = critic_loss+actor_loss
     return loss
+AC_loss = jit(AC_loss, static_argnums=(1,9,10))
 
-# def AC_loss(last_states, actions, rewards, states, terminals, beta, gamma, num_actors, num_actions):
-#     phi = hk.Sequential([
-#         hk.Conv2D(16, 3, padding='VALID'),
-#         jx.nn.silu,
-#         hk.Flatten(),
-#         hk.Linear(128),
-#         jx.nn.silu
-#     ])
-
-#     pi_layer = hk.Linear(num_actions)
-#     V_layer = hk.Linear(1)
-
-#     V_curr = V_layer(phi(states))
-#     pi_last = pi_layer(phi(last_states))
-#     V_last = V_layer(phi(last_states))
-
-#     entropy = -jnp.sum(jnp.log(pi_last)*pi_last, axis=1)
-#     loss = jnp.mean(0.5*(gamma*jnp.where(terminals,0,jx.lax.stop_gradient(V_curr))+rewards-V_last)**2-\
-#            0.5*(jx.lax.stop_gradient(gamma*jnp.where(terminals,0,V_curr)+rewards-V_last)*jnp.log(pi_last[jnp.arange(num_actors),actions]))-\
-#            beta*entropy)
-#     return loss
-# AC_loss = jit(AC_loss, static_argnames=('num_actors', 'num_actions'))
-
-def sample_actions(states, key, num_actions):
-    network = AC_network(num_actions)
-    pi_logit, _ = network(states)
+def sample_actions(params, network, states, key, num_actions):
+    pi_logit, _ = network(params,states)
     output = jx.random.categorical(key, pi_logit)
     return output
+sample_actions = jit(sample_actions, static_argnums=(1,4))
 
 # def sample_action(logit, key):
 #     output = jx.random.categorical(key, logit)
@@ -106,22 +82,19 @@ class AC_agent():
 
         opt_init, self.opt_update, self.get_params = optimizers.rmsprop(alpha,gamma_rms,epsilon_rms)
 
-        loss = hk.without_apply_rng(hk.transform(AC_loss))
-        self.sample = hk.without_apply_rng(hk.transform(sample_actions))
-        dummy_last_states = jnp.zeros((num_actors,10,10,in_channels))
-        dummy_actions = jnp.zeros(num_actors, dtype=int)
-        dummy_rewards = jnp.zeros(num_actors)
-        dummy_terminals = jnp.zeros(num_actors, dtype=bool)
-        dummy_states = jnp.zeros((num_actors,10,10,in_channels))
-
+        network = hk.without_apply_rng(hk.transform(lambda s: AC_network(num_actions)(s)))
+        self.net_apply = network.apply
         self.key, subkey = jx.random.split(key)
-        params = loss.init(subkey, dummy_last_states, dummy_actions, dummy_rewards, dummy_states, dummy_terminals, self.beta, self.gamma, num_actors, num_actions)
+        dummy_states = jnp.zeros((num_actors,10,10,in_channels))
+        params = network.init(subkey,dummy_states)
+
+        self.sample = sample_actions
+
         self.opt_state = opt_init(params)
 
-        loss_apply = jit(loss.apply, static_argnums=(8,9))
-        self.sample_apply = jit(self.sample.apply, static_argnums=3)
+        self.sample = sample_actions
         self.opt_update = jit(self.opt_update)
-        self.loss_grad = jit(grad(loss_apply), static_argnums=(8,9))
+        self.loss_grad = jit(grad(AC_loss), static_argnums=(1,9,10))
         # loss_apply = loss.apply
         # self.sample_apply = self.sample.apply
         # self.opt_update = self.opt_update
@@ -131,7 +104,7 @@ class AC_agent():
     def act(self, states):
         states = jnp.stack(states)
         self.key, subkey = jx.random.split(self.key)
-        return self.sample_apply(self.params(), states, subkey, self.num_actions)
+        return self.sample(self.params(), self.net_apply, states, subkey, self.num_actions)
 
     def params(self):
         return self.get_params(self.opt_state)
@@ -141,7 +114,7 @@ class AC_agent():
         rewards = jnp.stack(rewards)
         curr_states = jnp.stack(curr_states)
         terminals = jnp.stack(terminals)
-        grads = self.loss_grad(self.params(), last_states, actions, rewards, curr_states, terminals, self.beta, self.gamma, self.num_actors, self.num_actions)
+        grads = self.loss_grad(self.params(), self.net_apply, last_states, actions, rewards, curr_states, terminals, self.beta, self.gamma, self.num_actors, self.num_actions)
         self.opt_state = self.opt_update(self.t, grads, self.opt_state)
         self.t += 1
          
