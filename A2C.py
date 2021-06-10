@@ -33,18 +33,23 @@ class AC_network(hk.Module):
         pi_layer = hk.Linear(self.num_actions)
         V_layer = hk.Linear(1)
         phi = phi(s)
-        return pi_layer(phi), V_layer(phi)
+        return pi_layer(phi), V_layer(phi)[:,0]
 
-def AC_loss(last_states, actions, rewards, states, terminals, beta, gamma, num_actors, num_actions):
+def AC_loss(last_states, actions, rewards, curr_states, terminals, beta, gamma, num_actors, num_actions):
     network = AC_network(num_actions)
 
-    pi_logit_curr, V_curr = network(states)
+    pi_logit_curr, V_curr = network(curr_states)
     pi_logit_last, V_last = network(last_states)
 
+    # print(terminals.shape)
+    # print(V_curr.shape)
+    # print(rewards.shape)
+    # print(jx.lax.stop_gradient(gamma*jnp.where(terminals,0,V_curr)+rewards-V_last).shape)
+
+    critic_loss = jnp.mean(0.5*(gamma*jx.lax.stop_gradient(jnp.where(terminals,0,V_curr))+rewards-V_last)**2)
     entropy = -jnp.sum(jx.nn.log_softmax(pi_logit_last)*jx.nn.softmax(pi_logit_last), axis=1)
-    loss = jnp.mean(0.5*(gamma*jnp.where(terminals,0,jx.lax.stop_gradient(V_curr))+rewards-V_last)**2-\
-           0.5*(jx.lax.stop_gradient(gamma*jnp.where(terminals,0,V_curr)+rewards-V_last)*jx.nn.log_softmax(pi_logit_last)[jnp.arange(num_actors),actions])-\
-           beta*entropy)
+    actor_loss = jnp.mean(-0.5*(jx.lax.stop_gradient(gamma*jnp.where(terminals,0,V_curr)+rewards-V_last)*jx.nn.log_softmax(pi_logit_last)[jnp.arange(num_actors),actions])-beta*entropy)
+    loss = critic_loss+actor_loss
     return loss
 
 # def AC_loss(last_states, actions, rewards, states, terminals, beta, gamma, num_actors, num_actions):
@@ -101,7 +106,7 @@ class AC_agent():
 
         opt_init, self.opt_update, self.get_params = optimizers.rmsprop(alpha,gamma_rms,epsilon_rms)
 
-        self.loss = hk.without_apply_rng(hk.transform(AC_loss))
+        loss = hk.without_apply_rng(hk.transform(AC_loss))
         self.sample = hk.without_apply_rng(hk.transform(sample_actions))
         dummy_last_states = jnp.zeros((num_actors,10,10,in_channels))
         dummy_actions = jnp.zeros(num_actors, dtype=int)
@@ -110,13 +115,18 @@ class AC_agent():
         dummy_states = jnp.zeros((num_actors,10,10,in_channels))
 
         self.key, subkey = jx.random.split(key)
-        params = self.loss.init(subkey, dummy_last_states, dummy_actions, dummy_rewards, dummy_states, dummy_terminals, self.beta, self.gamma, num_actors, num_actions)
+        params = loss.init(subkey, dummy_last_states, dummy_actions, dummy_rewards, dummy_states, dummy_terminals, self.beta, self.gamma, num_actors, num_actions)
         self.opt_state = opt_init(params)
 
-        self.loss_apply = jit(self.loss.apply, static_argnums=(8,9))
+        loss_apply = jit(loss.apply, static_argnums=(8,9))
         self.sample_apply = jit(self.sample.apply, static_argnums=3)
         self.opt_update = jit(self.opt_update)
-        self.loss_grad = jit(grad(self.loss_apply), static_argnums=(8,9))
+        self.loss_grad = jit(grad(loss_apply), static_argnums=(8,9))
+        # loss_apply = loss.apply
+        # self.sample_apply = self.sample.apply
+        # self.opt_update = self.opt_update
+        # self.loss_grad = grad(loss_apply)
+
 
     def act(self, states):
         states = jnp.stack(states)
@@ -126,15 +136,14 @@ class AC_agent():
     def params(self):
         return self.get_params(self.opt_state)
 
-    def update(self, states, actions, rewards, next_states, terminals):
-        states = jnp.stack(states)
+    def update(self, last_states, actions, rewards, curr_states, terminals):
+        last_states = jnp.stack(last_states)
         rewards = jnp.stack(rewards)
-        next_states = jnp.stack(next_states)
+        curr_states = jnp.stack(curr_states)
         terminals = jnp.stack(terminals)
-        grads = self.loss_grad(self.params(), states, actions, rewards, next_states, terminals, self.beta, self.gamma, self.num_actors, self.num_actions)
+        grads = self.loss_grad(self.params(), last_states, actions, rewards, curr_states, terminals, self.beta, self.gamma, self.num_actors, self.num_actions)
         self.opt_state = self.opt_update(self.t, grads, self.opt_state)
         self.t += 1
-        # self.params = jx.tree_multimap(self.optimizer, self.params, grads) 
          
 
 parser = argparse.ArgumentParser()
@@ -184,6 +193,7 @@ t=0
 t_start = time.time()
 while t < num_frames:
     actions = [valid_actions[a] for a in agent.act(states)]
+    print(actions)
     rewards = []
     new_terminals = []
     for i, (env, term, action) in enumerate(zip(envs, terminals, actions)):
