@@ -8,9 +8,12 @@ import json
 
 import argparse
 
-from tqdm import tqdm
+import time
 
-import optimizers
+# from tqdm import tqdm
+
+# import optimizers
+from jax.experimental import optimizers
 
 from minatar import Environment
 
@@ -38,7 +41,7 @@ def AC_loss(last_states, actions, rewards, states, terminals, beta, gamma, num_a
     pi_logit_curr, V_curr = network(states)
     pi_logit_last, V_last = network(last_states)
 
-    entropy = -jnp.sum(jnp.log(pi_logit_last)*pi_logit_last, axis=1)
+    entropy = -jnp.sum(jx.nn.log_softmax(pi_logit_last)*jx.nn.softmax(pi_logit_last), axis=1)
     loss = jnp.mean(0.5*(gamma*jnp.where(terminals,0,jx.lax.stop_gradient(V_curr))+rewards-V_last)**2-\
            0.5*(jx.lax.stop_gradient(gamma*jnp.where(terminals,0,V_curr)+rewards-V_last)*jx.nn.log_softmax(pi_logit_last)[jnp.arange(num_actors),actions])-\
            beta*entropy)
@@ -94,8 +97,9 @@ class AC_agent():
         self.beta = beta
         self.num_actors = num_actors
         self.num_actions = num_actions
+        self.t = 0
 
-        self.optimizer = optimizers.rmsprop_optimizer(alpha,gamma_rms,epsilon_rms)
+        opt_init, self.opt_update, self.get_params = optimizers.rmsprop(alpha,gamma_rms,epsilon_rms)
 
         self.loss = hk.without_apply_rng(hk.transform(AC_loss))
         self.sample = hk.without_apply_rng(hk.transform(sample_actions))
@@ -106,21 +110,30 @@ class AC_agent():
         dummy_states = jnp.zeros((num_actors,10,10,in_channels))
 
         self.key, subkey = jx.random.split(key)
-        self.params = self.loss.init(subkey, dummy_last_states, dummy_actions, dummy_rewards, dummy_states, dummy_terminals, self.beta, self.gamma, num_actors, num_actions)
+        params = self.loss.init(subkey, dummy_last_states, dummy_actions, dummy_rewards, dummy_states, dummy_terminals, self.beta, self.gamma, num_actors, num_actions)
+        self.opt_state = opt_init(params)
+
+        self.loss_apply = jit(self.loss.apply, static_argnums=(8,9))
+        self.sample_apply = jit(self.sample.apply, static_argnums=3)
+        self.opt_update = jit(self.opt_update)
+        self.loss_grad = jit(grad(self.loss_apply), static_argnums=(8,9))
 
     def act(self, states):
         states = jnp.stack(states)
         self.key, subkey = jx.random.split(self.key)
-        return self.sample.apply(self.params, states, subkey, self.num_actions)
+        return self.sample_apply(self.params(), states, subkey, self.num_actions)
 
+    def params(self):
+        return self.get_params(self.opt_state)
 
     def update(self, states, actions, rewards, next_states, terminals):
         states = jnp.stack(states)
         rewards = jnp.stack(rewards)
         next_states = jnp.stack(next_states)
         terminals = jnp.stack(terminals)
-        grads = grad(self.loss.apply)(self.params, states, actions, rewards, next_states, terminals, self.beta, self.gamma, self.num_actors, self.num_actions)
-        self.params = self.optimizer(self.params, grads)
+        grads = self.loss_grad(self.params(), states, actions, rewards, next_states, terminals, self.beta, self.gamma, self.num_actors, self.num_actions)
+        self.opt_state = self.opt_update(self.t, grads, self.opt_state)
+        self.t += 1
         # self.params = jx.tree_multimap(self.optimizer, self.params, grads) 
          
 
@@ -163,17 +176,27 @@ states = [env.state().astype(float) for env in envs]
 last_states = None
 terminals = [False]*num_actors
 rewards = [0]*num_actors
+returns = []
+curr_returns = [0.0]*num_actors
+avg_return = 0.0
+termination_times = []
 t=0
+t_start = time.time()
 while t < num_frames:
     actions = [valid_actions[a] for a in agent.act(states)]
     rewards = []
     new_terminals = []
-    for env, term, action in zip(envs, terminals, actions):
+    for i, (env, term, action) in enumerate(zip(envs, terminals, actions)):
         if(not term):
             r, term = env.act(action)
+            curr_returns[i]+=r
         else:
             r = 0
             term = False
+            termination_times+=[t]
+            returns+=[curr_returns[i]]
+            avg_return = 0.99 * avg_return + 0.01 * curr_returns[i]
+            curr_returns[i]=0
             env.reset()
         rewards+=[r]
         new_terminals+=[term]
@@ -183,4 +206,8 @@ while t < num_frames:
     #TODO: Ensure state is not used following termination
     agent.update(last_states, actions, rewards, states, terminals)
     t += 1
+    #print logging info periodically
+    if(t%100==0):
+        print("Avg return: " +str(jnp.around(avg_return, 2))+" | Frame: "+str(t)+" | Time per frame: " +
+                         str((time.time()-t_start)/t))
     

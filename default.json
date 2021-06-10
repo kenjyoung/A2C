@@ -1,1 +1,1 @@
-{"alpha":0.00048828125, "gamma": 0.99, "beta": 0.01, "num_actors": 8, "gamma_rms": 0.99, "epsilon_rms": 0.0001, "num_frames": 100000, "game": "space_invaders"}
+{"alpha":0.00048828125, "gamma": 0.99, "beta": 0.01, "num_actors": 1, "gamma_rms": 0.99, "epsilon_rms": 0.0001, "num_frames": 100000, "game": "space_invaders"}
