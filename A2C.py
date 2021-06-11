@@ -71,8 +71,8 @@ class multienv():
         for p in self.pipes:
             p.send(None)
         for proc in self.procs:
-            self.proc.join()
-            
+            proc.join()
+
 class AC_network(hk.Module):
     def __init__(self, num_actions, name=None):
         super().__init__(name=name)
