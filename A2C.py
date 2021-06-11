@@ -26,6 +26,9 @@ def run_environment_instance(game, pipe, seed=None):
     pipe.send([r,term,state])
     while(True):
         action = pipe.recv()
+        if action is None:
+            pipe.close()
+            break
         if(not term):
             #translate agent actions to world actions
             r, term = env.act(valid_actions[action])
@@ -33,10 +36,11 @@ def run_environment_instance(game, pipe, seed=None):
             r = 0
             term = False
             env.reset()
+        state = env.state()
         pipe.send([r,term,state])
 
 class multienv():
-    def __init__(self, game, num_envs, key):
+    def __init__(self, game, num_envs, key=None):
         self.envs = [Environment(game) for i in range(num_envs)]
         self.pipes = []
         self.procs = []
@@ -64,10 +68,11 @@ class multienv():
         return jnp.stack(rewards), jnp.stack(terminals), jnp.stack(states).astype(float)
 
     def end(self):
+        for p in self.pipes:
+            p.send(None)
         for proc in self.procs:
             self.proc.join()
-
-
+            
 class AC_network(hk.Module):
     def __init__(self, num_actions, name=None):
         super().__init__(name=name)
@@ -208,7 +213,6 @@ while t < num_frames:
     termination_times+=[t]*len(new_returns)
     for ret in new_returns:
         avg_return = 0.99 * avg_return + 0.01 * ret
-    #TODO: Ensure state is not used following termination
     agent.update(last_states, actions, rewards, states, terminals)
     t += 1
     #print logging info periodically
