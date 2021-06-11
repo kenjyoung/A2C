@@ -15,6 +15,59 @@ from jax.experimental import optimizers
 
 from minatar import Environment
 
+from multiprocessing import Pipe, Process
+
+def run_environment_instance(game, pipe, seed=None):
+    env = Environment(game,random_seed=seed)
+    valid_actions = env.minimal_action_set()
+    r = 0
+    term = False
+    state = env.state()
+    pipe.send([r,term,state])
+    while(True):
+        action = pipe.recv()
+        if(not term):
+            #translate agent actions to world actions
+            r, term = env.act(valid_actions[action])
+        else:
+            r = 0
+            term = False
+            env.reset()
+        pipe.send([r,term,state])
+
+class multienv():
+    def __init__(self, game, num_envs, key):
+        self.envs = [Environment(game) for i in range(num_envs)]
+        self.pipes = []
+        self.procs = []
+        keys = jx.random.split(key, num_envs)
+        for i in range(num_envs):
+            p, child_p = Pipe()
+            self.pipes+=[p]
+            proc = Process(target = run_environment_instance, args=(game, child_p, int(keys[i][0])))
+            self.procs += [proc]
+            proc.start()
+
+    def act(self, actions):
+        for a, p in zip(actions,self.pipes):
+            p.send(a)
+
+    def observe(self):
+        rewards = []
+        terminals = []
+        states = []
+        for p in self.pipes:
+            r, term, state = p.recv()
+            rewards+=[r]
+            terminals+=[term]
+            states+=[state]
+        return jnp.stack(rewards), jnp.stack(terminals), jnp.stack(states).astype(float)
+
+    def end(self):
+        for proc in self.procs:
+            self.proc.join()
+
+
 class AC_network(hk.Module):
     def __init__(self, num_actions, name=None):
         super().__init__(name=name)
@@ -23,10 +76,10 @@ class AC_network(hk.Module):
     def __call__(self, s):
         phi = hk.Sequential([
                         hk.Conv2D(16, 3, padding='VALID'),
-                        jx.nn.relu,
+                        jx.nn.silu,
                         hk.Flatten(),
                         hk.Linear(128),
-                        jx.nn.relu
+                        jx.nn.silu
                     ])
         pi_layer = hk.Linear(self.num_actions)
         V_layer = hk.Linear(1)
@@ -89,10 +142,6 @@ class AC_agent():
         return self.get_params(self.opt_state)
 
     def update(self, last_states, actions, rewards, curr_states, terminals):
-        last_states = jnp.stack(last_states)
-        rewards = jnp.stack(rewards)
-        curr_states = jnp.stack(curr_states)
-        terminals = jnp.stack(terminals)
         grads = self.loss_grad(self.params(), self.net_apply, last_states, actions, rewards, curr_states, terminals, self.beta, self.gamma, self.num_actors, self.num_actions)
         self.opt_state = self.opt_update(self.t, grads, self.opt_state)
         self.t += 1
@@ -119,12 +168,17 @@ epsilon_rms = config["epsilon_rms"]
 game = config["game"]
 num_frames = config["num_frames"]
 
-envs = [Environment(game) for i in range(num_actors)]
+#This is only initialized to check minimal_action_set and state_shape
+env = Environment(game)
 
-valid_actions = envs[0].minimal_action_set()
+key, subkey = jx.random.split(key)
+envs = multienv(game, num_actors, subkey)
+
+valid_actions = env.minimal_action_set()
+
 key, subkey = jx.random.split(key)
 agent = AC_agent(subkey,
-                 envs[0].state_shape()[2],
+                 env.state_shape()[2],
                  len(valid_actions),
                  num_actors,
                  alpha,
@@ -133,39 +187,27 @@ agent = AC_agent(subkey,
                  gamma_rms,
                  epsilon_rms)
 
-states = [env.state().astype(float) for env in envs]
+rewards, terminals, states = envs.observe()
+states = states.astype(float)
 last_states = None
-terminals = [False]*num_actors
-rewards = [0]*num_actors
 returns = []
-curr_returns = [0.0]*num_actors
+curr_returns = jnp.zeros((num_actors,))
 avg_return = 0.0
 termination_times = []
 t=0
 t_start = time.time()
 while t < num_frames:
     actions = agent.act(states)
-    rewards = []
-    new_terminals = []
-    for i, (env, term, action) in enumerate(zip(envs, terminals, actions)):
-        #continue until terminated, when terminated reset env and begin new episode immediately
-        if(not term):
-            #translate agent actions to world actions
-            r, term = env.act(valid_actions[action])
-            curr_returns[i] += r
-        else:
-            r = 0
-            term = False
-            termination_times += [t]
-            returns += [curr_returns[i]]
-            avg_return = 0.99 * avg_return + 0.01 * curr_returns[i]
-            curr_returns[i] = 0
-            env.reset()
-        rewards += [r]
-        new_terminals += [term]
-    terminals = new_terminals
+    envs.act(actions)
     last_states = states
-    states = [env.state().astype(float) for env in envs]
+    rewards, terminals, states = envs.observe()
+    curr_returns+=rewards
+    new_returns = list(curr_returns[terminals])
+    curr_returns=jnp.where(terminals, 0.0, curr_returns)
+    returns+=new_returns
+    termination_times+=[t]*len(new_returns)
+    for ret in new_returns:
+        avg_return = 0.99 * avg_return + 0.01 * ret
     #TODO: Ensure state is not used following termination
     agent.update(last_states, actions, rewards, states, terminals)
     t += 1
@@ -173,4 +215,5 @@ while t < num_frames:
     if(t%100==0):
         print("Avg return: " +str(jnp.around(avg_return, 2))+" | Frame: "+str(t)+" | Time per frame: " +
                          str((time.time()-t_start)/t))
+envs.end()
     
