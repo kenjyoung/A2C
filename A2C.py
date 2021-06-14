@@ -10,7 +10,6 @@ import argparse
 
 import time
 
-# import optimizers
 from jax.experimental import optimizers
 
 from minatar import Environment
@@ -18,6 +17,10 @@ from minatar import Environment
 from multiprocessing import Pipe, Process
 
 import pickle as pkl
+
+########################################################################
+# Handle Parallel Environments
+########################################################################
 
 def run_environment_instance(game, pipe, seed):
     env = Environment(game, random_seed=seed)
@@ -75,6 +78,11 @@ class multienv():
             p.send(None)
         for proc in self.procs:
             proc.join()
+
+
+########################################################################
+# Define Agent
+########################################################################
 
 class AC_network(hk.Module):
     def __init__(self, num_actions, name=None):
@@ -154,6 +162,10 @@ class AC_agent():
         self.opt_state = self.opt_update(self.t, grads, self.opt_state)
         self.t += 1
 
+########################################################################
+# Parse Arguments and Config File
+########################################################################
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--output", "-o", type=str, default="A2C.out")
 parser.add_argument("--model", "-m", type=str, default="A2C.model")
@@ -173,6 +185,10 @@ gamma_rms = config["gamma_rms"]
 epsilon_rms = config["epsilon_rms"]
 game = config["game"]
 num_frames = config["num_frames"]
+
+########################################################################
+# Initialize Agent and Environments
+########################################################################
 
 #This is only initialized to check minimal_action_set and state_shape
 env = Environment(game)
@@ -202,6 +218,11 @@ avg_return = 0.0
 termination_times = []
 t=0
 t_start = time.time()
+
+########################################################################
+# Agent Environment Interaction Loop
+########################################################################
+
 while t < num_frames:
     actions = agent.act(states)
     envs.act(actions)
@@ -222,6 +243,11 @@ while t < num_frames:
     if(t%100==0):
         print("Avg return: "+str(jnp.around(avg_return, 2))+" | Frame: "+str(t)+" | Time per frame: "+str((time.time()-t_start)/t))
 envs.end()
+
+
+########################################################################
+# Save Data and Weights
+########################################################################
 
 with open(args.output, 'wb') as f:
         pkl.dump({

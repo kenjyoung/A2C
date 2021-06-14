@@ -1,4 +1,4 @@
-A minimalistic implementation of A2C, with multiple parallel actors, for the MinAtar environment using JAX and haiku to run do
+A minimalistic implementation of A2C, with multiple parallel actors, for the MinAtar environment using JAX and haiku. To run do
 ```bash
 python3 A2C.py -c default.json -s 0
 ```
