@@ -1,6 +1,6 @@
 import jax as jx
 import jax.numpy as jnp
-from jax import grad, jit, vmap
+from jax import grad, jit
 
 import haiku as hk
 
@@ -17,8 +17,10 @@ from minatar import Environment
 
 from multiprocessing import Pipe, Process
 
-def run_environment_instance(game, pipe, seed=None):
-    env = Environment(game,random_seed=seed)
+import pickle as pkl
+
+def run_environment_instance(game, pipe, seed):
+    env = Environment(game, random_seed=seed)
     valid_actions = env.minimal_action_set()
     r = 0
     term = False
@@ -40,7 +42,7 @@ def run_environment_instance(game, pipe, seed=None):
         pipe.send([r,term,state])
 
 class multienv():
-    def __init__(self, game, num_envs, key=None):
+    def __init__(self, game, num_envs, key):
         self.envs = [Environment(game) for i in range(num_envs)]
         self.pipes = []
         self.procs = []
@@ -48,7 +50,8 @@ class multienv():
         for i in range(num_envs):
             p, child_p = Pipe()
             self.pipes+=[p]
-            proc = Process(target = run_environment_instance, args=(game, child_p, int(keys[i][0])))
+            seed = int(keys[i][0])
+            proc = Process(target = run_environment_instance, args=(game, child_p, seed))
             self.procs += [proc]
             proc.start()
 
@@ -150,13 +153,11 @@ class AC_agent():
         grads = self.loss_grad(self.params(), self.net_apply, last_states, actions, rewards, curr_states, terminals, self.beta, self.gamma, self.num_actors, self.num_actions)
         self.opt_state = self.opt_update(self.t, grads, self.opt_state)
         self.t += 1
-         
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--output", "-o", type=str, default="A2C.out")
 parser.add_argument("--model", "-m", type=str, default="A2C.model")
 parser.add_argument("--seed", "-s", type=int, default=0)
-parser.add_argument("--verbose", "-v", action="store_true")
 parser.add_argument("--config", "-c", type=str)
 args = parser.parse_args()
 key = jx.random.PRNGKey(args.seed)
@@ -205,6 +206,7 @@ while t < num_frames:
     actions = agent.act(states)
     envs.act(actions)
     last_states = states
+
     rewards, terminals, states = envs.observe()
     curr_returns+=rewards
     new_returns = list(curr_returns[terminals])
@@ -213,11 +215,20 @@ while t < num_frames:
     termination_times+=[t]*len(new_returns)
     for ret in new_returns:
         avg_return = 0.99 * avg_return + 0.01 * ret
+
     agent.update(last_states, actions, rewards, states, terminals)
     t += 1
     #print logging info periodically
     if(t%100==0):
-        print("Avg return: " +str(jnp.around(avg_return, 2))+" | Frame: "+str(t)+" | Time per frame: " +
-                         str((time.time()-t_start)/t))
+        print("Avg return: "+str(jnp.around(avg_return, 2))+" | Frame: "+str(t)+" | Time per frame: "+str((time.time()-t_start)/t))
 envs.end()
-    
+
+with open(args.output, 'wb') as f:
+        pkl.dump({
+        'config': config,
+        'returns':returns,
+        'termination_times':termination_times
+        }, f)
+
+with open(args.model,'wb') as f:
+    pkl.dump(agent.params(), f)
