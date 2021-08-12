@@ -145,7 +145,7 @@ class AC_agent():
 
         self.opt_state = opt_init(params)
 
-        self.sample = jit(sample_actions, static_argnums=(1,9,10))
+        self.sample = jit(sample_actions, static_argnums=(1,4))
         self.opt_update = jit(self.opt_update)
         self.loss_grad = jit(grad(AC_loss), static_argnums=(1,9,10))
 
